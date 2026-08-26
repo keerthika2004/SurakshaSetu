@@ -3,10 +3,15 @@ import { NextResponse } from "next/server";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const MODEL = "gpt-5.4-nano";
 
-const SYSTEM_PROMPT = `You are a fraud-detection assistant for Indian citizens. Judge the scam risk of a message, call, or payment request the user received. Be decisive and clear, not alarmist. Use these India-specific scam patterns:
+const SYSTEM_PROMPT = `You are a fraud-detection assistant for Indian citizens. Judge the scam risk of a message, call, or payment request the user received. Be decisive and clear, not alarmist.
 
-- Digital arrest: caller claims to be a police/CBI/customs/TRAI/courier; says a parcel, SIM, or case is in the user's name; demands money or "verification," often over a video call; pushes serecy and urgency.
-Truth: no Indian agency arrests over a call or asks for money - always a scam.
+CRITICAL: First, classify the user's situation into one of three states:
+- "about-to-be": User received a suspicious link, message, or call but has NOT lost money and is not currently on the phone.
+- "mid-attack": User is CURRENTLY on a call (e.g., fake CBI/police digital arrest) or is actively being pressured to transfer money RIGHT NOW.
+- "already-scammed": User has already transferred money, paid a fee, or their account was debited.
+
+Use these India-specific scam patterns:
+- Digital arrest: caller claims to be a police/CBI/customs/TRAI/courier; says a parcel, SIM, or case is in the user's name; demands money or "verification," often over a video call; pushes serecy and urgency. Truth: no Indian agency arrests over a call or asks for money - always a scam.
 - UPI collect-request fraud: a "collect/request money" prompt that DEBITS the user if approved, disguised as receiving a refund/prize/payment. TRUTH: You never approve a request to RECEIVE money.
 - OTP / phishing: anyone asking for OTP, CVV, PIN, card number, or links to "verify KYC / bank/ electricity bill/ update details." TRUTH: banks never ask for OTP; such links steal your data.
 - Investment/ task/ crypto-doubling groups on whatsapp/ telegram promising high or guaranteed returns.
@@ -14,14 +19,16 @@ Truth: no Indian agency arrests over a call or asks for money - always a scam.
 - Lottery/ KBC/ prize: "You won, pay a fee to claim."
 
 Rules:
-- If there are genuinely no red flags, return verdict "green".
-- "what_to_do" for any scam MUST include: do not pay, do not click, block the sender, and report at cybercrime.gov.in or cal 1930.
+- If there are genuinely no red flags, return verdict "green" and state "about-to-be".
+- "what_to_do" for any scam MUST include: do not pay, do not click, block the sender, and report at cybercrime.gov.in or call 1930.
+- For "mid-attack", emphasize: "Hang up the call immediately. Real police never arrest over video calls."
 - "how_it_works" = one plain-language sentence explaining the trick so the user spots it next time.
 - Reply in the SAME language as the user's input.
 - NEVER ask the user for personal or financial details.
-- Return ONLY the JSON object, no extra texr.`;
+- Return ONLY the JSON object, no extra text.`;
 
 type Analysis = {
+  state: "about-to-be" | "mid-attack" | "already-scammed";
   verdict: "green" | "yellow" | "red";
   scam_type: string;
   red_flags: string[];
@@ -32,8 +39,9 @@ type Analysis = {
 const analysisSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"],
+  required: ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"],
   properties: {
+    state: { type: "string", enum: ["about-to-be", "mid-attack", "already-scammed"] },
     verdict: { type: "string", enum: ["green", "yellow", "red"] },
     scam_type: { type: "string" },
     red_flags: { type: "array", items: { type: "string" } },
@@ -43,9 +51,10 @@ const analysisSchema = {
 };
 
 const safeDefault: Analysis = {
+  state: "about-to-be",
   verdict: "yellow",
   scam_type: "Treat this as suspicious",
-  red_flags: ["We couldn't analyse that — treat it as suspicious and avoid sharing details."],
+  red_flags: ["We couldn't analyse that completely — treat it as suspicious and avoid sharing details."],
   what_to_do: [
     "Do not pay or share personal or financial details.",
     "Do not click links or approve payment requests.",
@@ -55,16 +64,55 @@ const safeDefault: Analysis = {
   how_it_works: "When a message cannot be checked, pausing and verifying independently is the safest next step.",
 };
 
+function getDeterministicFallback(text: string): Analysis {
+  const lower = text.toLowerCase();
+  
+  // Already scammed heuristic
+  if (lower.includes("paid") || lower.includes("lost") || lower.includes("transferred") || lower.includes("deducted") || lower.includes("already sent")) {
+    return {
+      state: "already-scammed",
+      verdict: "red",
+      scam_type: "Possible Fraud Incident",
+      red_flags: ["Money has already been transferred or deducted."],
+      what_to_do: ["Call 1930 immediately.", "Contact your bank to freeze the transaction.", "Save all chats and transaction IDs."],
+      how_it_works: "Scammers create false urgency or promises to trick victims into sending money.",
+    };
+  }
+
+  // Mid-attack heuristic
+  if (lower.includes("on call") || lower.includes("on the phone") || lower.includes("video call") || lower.includes("threatening") || lower.includes("arrest") || lower.includes("cbi") || lower.includes("police")) {
+    return {
+      state: "mid-attack",
+      verdict: "red",
+      scam_type: "Active Scam Attempt (e.g. Digital Arrest)",
+      red_flags: ["Caller is threatening arrest or demanding immediate payment.", "Claiming to be law enforcement over a phone/video call."],
+      what_to_do: ["Hang up the call immediately.", "Real police NEVER arrest over video calls or ask for money.", "Do not transfer any funds.", "Block the number."],
+      how_it_works: "Scammers impersonate authorities to induce panic and force you to pay 'fines' or 'security deposits'.",
+    };
+  }
+
+  // About to be scammed heuristic (Default)
+  return {
+    state: "about-to-be",
+    verdict: "yellow",
+    scam_type: "Suspicious Contact",
+    red_flags: ["Unsolicited contact asking for information, clicks, or money."],
+    what_to_do: ["Do not click any links.", "Do not share OTPs, PINs, or personal details.", "Block the sender."],
+    how_it_works: "Scammers send mass messages with phishing links or fake offers to steal credentials.",
+  };
+}
+
 function isAnalysis(value: unknown): value is Analysis {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate);
-  const expectedKeys = ["verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"];
+  const expectedKeys = ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"];
 
   return (
     keys.length === expectedKeys.length &&
     expectedKeys.every((key) => keys.includes(key)) &&
+    (candidate.state === "about-to-be" || candidate.state === "mid-attack" || candidate.state === "already-scammed") &&
     (candidate.verdict === "green" || candidate.verdict === "yellow" || candidate.verdict === "red") &&
     typeof candidate.scam_type === "string" &&
     Array.isArray(candidate.red_flags) &&
@@ -151,7 +199,7 @@ export async function POST(request: Request) {
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return NextResponse.json(safeDefault);
+  if (!apiKey) return NextResponse.json(getDeterministicFallback(text));
 
   try {
     // A strict JSON schema makes malformed output unlikely; retry once if it still occurs.
@@ -161,6 +209,6 @@ export async function POST(request: Request) {
       if (analysis) return NextResponse.json(analysis);
     }
 
-    return NextResponse.json(safeDefault);
-  } catch { return NextResponse.json(safeDefault); }
+    return NextResponse.json(getDeterministicFallback(text));
+  } catch { return NextResponse.json(getDeterministicFallback(text)); }
 }

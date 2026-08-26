@@ -2,38 +2,45 @@
 
 import { FormEvent, useState, useEffect } from "react";
 
-type Analysis = { verdict: "green" | "yellow" | "red"; scam_type: string; red_flags: string[]; what_to_do: string[]; how_it_works: string };
+type AnalysisState = "about-to-be" | "mid-attack" | "already-scammed";
+
+type Analysis = {
+  state: AnalysisState;
+  verdict: "green" | "yellow" | "red";
+  scam_type: string;
+  red_flags: string[];
+  what_to_do: string[];
+  how_it_works: string;
+};
 
 const verdictCopy = { green: "Looks safe", yellow: "Be careful", red: "This is almost certainly a scam" } as const;
 const MAX_MESSAGE_LENGTH = 5_000;
-const clientFallback: Analysis = { verdict: "yellow", scam_type: "Treat this as suspicious", red_flags: ["We couldn't analyse that — treat it as suspicious and avoid sharing details."], what_to_do: ["Do not pay or share personal or financial details.", "Do not click links or approve payment requests.", "Block the sender if they pressure you.", "Report suspected fraud at cybercrime.gov.in or call 1930."], how_it_works: "When a message cannot be checked, pausing and verifying independently is the safest next step." };
+const clientFallback: Analysis = { 
+  state: "about-to-be", 
+  verdict: "yellow", 
+  scam_type: "Treat this as suspicious", 
+  red_flags: ["We couldn't analyse that — treat it as suspicious and avoid sharing details."], 
+  what_to_do: ["Do not pay or share personal or financial details.", "Do not click links or approve payment requests.", "Block the sender if they pressure you.", "Report suspected fraud at cybercrime.gov.in or call 1930."], 
+  how_it_works: "When a message cannot be checked, pausing and verifying independently is the safest next step." 
+};
 
 const examples = [
-  {
-    label: "Digital arrest call",
-    text: "A caller claiming to be from CBI says a parcel linked to my Aadhaar contains illegal items. They want me to join a video call and transfer money for verification or I will be arrested today.",
-  },
-  {
-    label: "Unexpected UPI collect request",
-    text: "I received a UPI collect request saying it is a refund. It asks me to enter my UPI PIN to receive ₹2,000. I was not expecting any refund.",
-  },
-  {
-    label: "KYC phishing SMS",
-    text: "Your bank KYC will expire today. Click the link below and enter your card details and OTP immediately to avoid account suspension.",
-  },
+  { label: "a suspicious link", text: "Your bank KYC will expire today. Click the link below to verify." },
+  { label: "a call asking for an OTP", text: "CBI is on video call saying I need to verify my identity and pay a fee." },
+  { label: "already paid", text: "I just transferred 5000 via UPI for a part time job offer." },
 ] as const;
 
 function isAnalysis(value: unknown): value is Analysis {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return (item.verdict === "green" || item.verdict === "yellow" || item.verdict === "red") && typeof item.scam_type === "string" && Array.isArray(item.red_flags) && item.red_flags.every((flag) => typeof flag === "string") && Array.isArray(item.what_to_do) && item.what_to_do.every((step) => typeof step === "string") && typeof item.how_it_works === "string";
+  return (item.state === "about-to-be" || item.state === "mid-attack" || item.state === "already-scammed") && (item.verdict === "green" || item.verdict === "yellow" || item.verdict === "red") && typeof item.scam_type === "string" && Array.isArray(item.red_flags) && item.red_flags.every((flag) => typeof flag === "string") && Array.isArray(item.what_to_do) && item.what_to_do.every((step) => typeof step === "string") && typeof item.how_it_works === "string";
 }
 
 export default function Home() {
-  const [view, setView] = useState<"front-doors" | "happening-now" | "recovery" | "case-status">("front-doors");
+  const [view, setView] = useState<"triage-form" | "verdict" | "recovery" | "case-status">("triage-form");
   const [recoveryStep, setRecoveryStep] = useState(1);
   
-  // Happening Now State
+  // Triage Input State
   const [text, setText] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [error, setError] = useState("");
@@ -58,7 +65,7 @@ export default function Home() {
   const [copyStatus, setCopyStatus] = useState("");
   
   // Timer State
-  const [timeLeft, setTimeLeft] = useState(600); // 10 minutes
+  const [timeLeft, setTimeLeft] = useState(600);
   
   useEffect(() => {
     if (view === "recovery" && recoveryStep === 2) {
@@ -71,20 +78,39 @@ export default function Home() {
 
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!text.trim()) { setError("Paste the message, call details, or payment request first."); return; }
+    if (!text.trim()) { setError("Paste the message, call details, or describe the situation first."); return; }
     if (text.length > MAX_MESSAGE_LENGTH) { setError("Please keep the message to 5,000 characters or fewer."); return; }
     setError(""); setAnalysis(null); setIsLoading(true);
+    
+    let currentAnalysis = clientFallback;
     try {
       const response = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
       const payload: unknown = await response.json();
-      if (!response.ok || !isAnalysis(payload)) throw new Error("Analysis request failed");
-      setAnalysis(payload);
+      if (response.ok && isAnalysis(payload)) {
+        currentAnalysis = payload;
+      }
     } catch {
-      setAnalysis(clientFallback);
-    } finally { setIsLoading(false); }
+      // Fallback already assigned
+    } finally { 
+      setIsLoading(false); 
+      setAnalysis(currentAnalysis);
+      
+      if (currentAnalysis.state === "already-scammed") {
+        setDescription(text); // Pre-fill description
+        setRecoveryStep(1);
+        setView("recovery");
+      } else {
+        setView("verdict");
+      }
+    }
   }
 
-  function resetAnalysis() { setAnalysis(null); setError(""); }
+  function resetToHome() {
+    setView("triage-form");
+    setAnalysis(null);
+    setText("");
+    setError("");
+  }
 
   function getTriageVerdict() {
     if (method === "UPI" || method === "bank transfer") {
@@ -148,7 +174,7 @@ export default function Home() {
         <header className="app-header">
           <div className="brand-mark" aria-hidden="true">S</div>
           <div>
-            <h1 id="page-title" onClick={() => setView("front-doors")} style={{cursor: "pointer"}} title="Back to Home">SurakshaSetu</h1>
+            <h1 id="page-title" onClick={resetToHome} style={{cursor: "pointer"}} title="Back to Home">SurakshaSetu</h1>
             <p>Cyber Fraud Emergency Room</p>
           </div>
         </header>
@@ -156,20 +182,26 @@ export default function Home() {
         <p className="eyebrow">Pause. Check. Act safely.</p>
         <div className="divider" />
 
-        {view === "front-doors" && (
-          <section className="front-doors slide-in">
-            <h2 className="front-doors-title">How can we help you?</h2>
-            <div className="front-doors-grid">
-              <button className="door-button primary-door" onClick={() => setView("happening-now")}>
-                <h3>It&apos;s happening right now</h3>
-                <p>I am on a suspicious call or being pressured to pay.</p>
-              </button>
-              <button className="door-button danger-door" onClick={() => { setView("recovery"); setRecoveryStep(1); }}>
-                <h3>I&apos;ve already been scammed</h3>
-                <p>I lost money and need to report it immediately.</p>
-              </button>
+        {view === "triage-form" && (
+          <section className="happening-now-form slide-in">
+            <div className="intro">
+              <h2>Tell us what's happening</h2>
+              <p>We'll figure out if it's a scam and guide you on exactly what to do next.</p>
             </div>
-            <p className="privacy-note mt-6">We never ask for your passwords, OTPs, or bank PINs.</p>
+            <form className="triage-form" onSubmit={handleAnalyze}>
+              <div className="example-chips" aria-label="Try an example">
+                {examples.map((example) => (
+                  <button key={example.label} type="button" className="example-chip" disabled={isLoading} onClick={() => { setText(example.text); setError(""); }}>
+                    {example.label}
+                  </button>
+                ))}
+              </div>
+              <textarea id="suspicious-message" name="suspicious-message" placeholder="Paste the message, or describe the situation..." rows={6} value={text} maxLength={MAX_MESSAGE_LENGTH} onChange={(event) => setText(event.target.value)} disabled={isLoading} />
+              {text.length > 0 && <p className="character-count">{text.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
+              {error && <p className="form-error" role="alert">{error}</p>}
+              <button type="submit" className="button button-primary" disabled={isLoading}>{isLoading ? "Checking safely…" : "Check it now"}</button>
+            </form>
+            <p className="privacy-note mt-6 text-center">We never ask for your passwords, OTPs, or bank PINs.</p>
           </section>
         )}
 
@@ -184,44 +216,35 @@ export default function Home() {
               <li className="timeline-complete"><span aria-hidden="true">✓</span><div><h3>Acknowledged</h3><p>Your complaint has been received.</p></div></li>
               <li className="timeline-current"><span aria-hidden="true">3</span><div><h3>Under Review</h3><p>The relevant team is reviewing the details.</p></div></li>
             </ol>
-            <button type="button" className="back-link" onClick={() => setView("front-doors")}>← Back to Home</button>
+            <button type="button" className="back-link" onClick={resetToHome}>← Back to Home</button>
           </section>
         )}
 
-        {view === "happening-now" && (
-          analysis ? (
-            <section className="analysis-result slide-in" aria-live="polite" aria-label="Scam analysis result">
-              <div className={`verdict-banner verdict-${analysis.verdict}`}><p>Our assessment</p><h2>{verdictCopy[analysis.verdict]}</h2><span>{analysis.scam_type}</span></div>
-              <section className="result-section"><h3>Why</h3><ul className="flag-list">{analysis.red_flags.map((flag, index) => <li key={`${flag}-${index}`}>{flag}</li>)}</ul></section>
-              <section className="result-section action-section"><h3>Do this now</h3><ul className="checklist">{analysis.what_to_do.map((step, index) => <li key={`${step}-${index}`}>{step}</li>)}</ul></section>
-              <aside className="how-it-works"><h3>So you spot it next time</h3><p>{analysis.how_it_works}</p></aside>
-              <button type="button" className="button button-secondary" onClick={resetAnalysis}>Check another message</button>
-              <button type="button" className="back-link" onClick={() => setView("front-doors")}>← Back to Home</button>
+        {view === "verdict" && analysis && (
+          <section className="analysis-result slide-in" aria-live="polite" aria-label="Scam analysis result">
+            <div className={`verdict-banner verdict-${analysis.verdict}`}>
+              <p>{analysis.state === 'mid-attack' ? 'LIVE COACHING' : 'OUR ASSESSMENT'}</p>
+              <h2>{analysis.state === 'mid-attack' ? 'This is a scam. Hang up.' : verdictCopy[analysis.verdict]}</h2>
+              <span>{analysis.scam_type}</span>
+            </div>
+            <section className="result-section action-section">
+              <h3>{analysis.state === 'mid-attack' ? 'Do this RIGHT NOW' : 'Precautions to take'}</h3>
+              <ul className="checklist">{analysis.what_to_do.map((step, index) => <li key={`${step}-${index}`}>{step}</li>)}</ul>
             </section>
-          ) : (
-            <section className="happening-now-form slide-in">
-              <div className="intro"><h2>Live Coach Mode</h2><p>Share what you received and we’ll help you take a safer next step.</p></div>
-              <form className="triage-form" onSubmit={handleAnalyze}>
-                <label htmlFor="suspicious-message">What is happening?</label>
-                <div className="example-chips" aria-label="Try an example">
-                  {examples.map((example) => (
-                    <button key={example.label} type="button" className="example-chip" disabled={isLoading} onClick={() => { setText(example.text); setError(""); }}>
-                      {example.label}
-                    </button>
-                  ))}
-                </div>
-                <textarea id="suspicious-message" name="suspicious-message" placeholder="Paste a suspicious message, call or payment request..." rows={6} value={text} maxLength={MAX_MESSAGE_LENGTH} onChange={(event) => setText(event.target.value)} disabled={isLoading} />
-                {text.length > 0 && <p className="character-count">{text.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
-                {error && <p className="form-error" role="alert">{error}</p>}
-                <button type="submit" className="button button-primary" disabled={isLoading}>{isLoading ? "Checking safely…" : "Check if it’s a scam"}</button>
-              </form>
-              <button type="button" className="back-link" onClick={() => setView("front-doors")}>← Back to Home</button>
+            <section className="result-section">
+              <h3>Red Flags</h3>
+              <ul className="flag-list">{analysis.red_flags.map((flag, index) => <li key={`${flag}-${index}`}>{flag}</li>)}</ul>
             </section>
-          )
+            <aside className="how-it-works">
+              <h3>How it works</h3>
+              <p>{analysis.how_it_works}</p>
+            </aside>
+            <button type="button" className="button button-secondary" onClick={resetToHome}>Check another message</button>
+          </section>
         )}
 
         {view === "recovery" && (
-          <section className="recovery-flow" aria-labelledby="recovery-title">
+          <section className="recovery-flow slide-in" aria-labelledby="recovery-title">
             <div className="recovery-progress">
               <span className={recoveryStep >= 1 ? "active" : ""}>Triage</span>
               <span className={recoveryStep >= 2 ? "active" : ""}>Checklist</span>
@@ -231,7 +254,7 @@ export default function Home() {
             
             {recoveryStep === 1 && (
               <div className="recovery-step slide-in">
-                <h2 id="recovery-title" className="step-title">Let's understand what happened.</h2>
+                <h2 id="recovery-title" className="step-title">Let's act quickly.</h2>
                 <div className="emergency-fields">
                   <label>Approximate amount lost
                     <input type="text" placeholder="e.g. ₹5,000" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -253,21 +276,11 @@ export default function Home() {
                       <option value="other">Other</option>
                     </select>
                   </label>
-                  <label>How did they contact you?
-                    <input type="text" placeholder="e.g. WhatsApp, phone call" value={contactMethod} onChange={(e) => setContactMethod(e.target.value)} />
-                  </label>
-                  <label>Do you have screenshots or transaction IDs?
-                    <select value={hasEvidence} onChange={(e) => setHasEvidence(e.target.value)}>
-                      <option value="">Select</option>
-                      <option value="yes">Yes</option>
-                      <option value="no">No</option>
-                    </select>
-                  </label>
                 </div>
-                <button type="button" className="button button-danger" onClick={() => {
+                <button type="button" className="button button-danger mt-4" onClick={() => {
                   if(amount && when && method) setRecoveryStep(2);
                 }} disabled={!amount || !when || !method}>Next Step</button>
-                <button type="button" className="back-link" onClick={() => setView("front-doors")}>← Back to Home</button>
+                <button type="button" className="back-link" onClick={resetToHome}>← Cancel and go back</button>
               </div>
             )}
 
@@ -277,7 +290,7 @@ export default function Home() {
                   <p>Verdict</p>
                   <h2 className="verdict-heading" style={{fontSize: "1.2rem", margin: "6px 0"}}>{triageVerdict.text}</h2>
                 </div>
-                <h2 className="step-title mt-4">First 10-minutes checklist</h2>
+                <h2 className="step-title mt-4">Golden-Hour Checklist</h2>
                 <div className="timer-box">
                   <span className="timer-icon">⏱</span> {formatTime(timeLeft)}
                 </div>
@@ -286,7 +299,7 @@ export default function Home() {
                   <li><div><h3>Call your bank or payment app</h3><p>Ask them to freeze the transfer.</p><div className="bank-script"><strong>Say this:</strong><p>“I have been scammed. Please freeze this transfer. The amount is {amount || "[amount]"}, paid by {method || "[method]"}. Please give me a complaint reference number.”</p></div></div></li>
                   <li><div><h3>Do not delete anything</h3><p>Save transaction IDs, chats, and SMS. Screenshot everything.</p></div></li>
                 </ol>
-                <button type="button" className="button button-primary" onClick={() => setRecoveryStep(3)}>I have done these, proceed to report</button>
+                <button type="button" className="button button-primary mt-4" onClick={() => setRecoveryStep(3)}>I have done these, proceed to report</button>
                 <button type="button" className="back-link" onClick={() => setRecoveryStep(1)}>← Back</button>
               </div>
             )}
@@ -311,9 +324,6 @@ export default function Home() {
                   </label>
                   <label>Scammer's Phone Number
                     <input type="tel" placeholder="e.g. +91 9876543210" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} />
-                  </label>
-                  <label>Your Bank Name
-                    <input type="text" placeholder="e.g. SBI, HDFC" value={bank} onChange={(e) => setBank(e.target.value)} />
                   </label>
                   <label>Briefly describe what happened
                     <textarea rows={4} placeholder="Who contacted you, what you paid, and when..." value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -354,7 +364,7 @@ export default function Home() {
                   </ul>
                 </div>
                 <button type="button" className="button button-primary mt-6" onClick={() => setView("case-status")}>Track Case Status</button>
-                <button type="button" className="back-link" onClick={() => setView("front-doors")}>← Back to Home</button>
+                <button type="button" className="back-link" onClick={resetToHome}>← Back to Home</button>
               </div>
             )}
           </section>
