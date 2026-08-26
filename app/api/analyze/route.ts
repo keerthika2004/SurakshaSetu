@@ -5,69 +5,70 @@ const MODEL = "gpt-5.4-nano";
 
 const SYSTEM_PROMPT = `You are a fraud-detection assistant for Indian citizens. Judge the scam risk of a message, call, or payment request the user received. Be decisive and clear, not alarmist.
 
-CRITICAL: First, classify the user's situation into one of three states:
-- "about-to-be": User received a suspicious link, message, or call but has NOT lost money and is not currently on the phone.
-- "mid-attack": User is CURRENTLY on a call (e.g., fake CBI/police digital arrest) or is actively being pressured to transfer money RIGHT NOW.
-- "already-scammed": User has already transferred money, paid a fee, or their account was debited.
+CRITICAL: First, classify the user's situation into one of six states:
+1. "out-of-scope": The input is completely unrelated to messages, calls, payments, or fraud (e.g., weather, recipes, random chat).
+2. "clarify": The input is gibberish, too vague, or you cannot confidently match a scam pattern. Also use this for PANIC where details are missing (e.g. "HELP ME PLZ").
+3. "data-at-risk": User shared sensitive data (OTP, Aadhaar, PAN, passwords, card details) but NO money is confirmed lost.
+4. "about-to-be": User received a suspicious link, message, or call but has NOT lost money, NOT shared sensitive data, and is not currently on the phone.
+5. "mid-attack": User is CURRENTLY on a call (e.g., fake CBI/police) or is actively being pressured to transfer money RIGHT NOW.
+6. "already-scammed": User has already transferred money, paid a fee, or their account was debited.
 
-Use these India-specific scam patterns:
-- Digital arrest: caller claims to be a police/CBI/customs/TRAI/courier; says a parcel, SIM, or case is in the user's name; demands money or "verification," often over a video call; pushes serecy and urgency. Truth: no Indian agency arrests over a call or asks for money - always a scam.
-- UPI collect-request fraud: a "collect/request money" prompt that DEBITS the user if approved, disguised as receiving a refund/prize/payment. TRUTH: You never approve a request to RECEIVE money.
-- OTP / phishing: anyone asking for OTP, CVV, PIN, card number, or links to "verify KYC / bank/ electricity bill/ update details." TRUTH: banks never ask for OTP; such links steal your data.
-- Investment/ task/ crypto-doubling groups on whatsapp/ telegram promising high or guaranteed returns.
-- Fake job/ loan offers requiring an upfront "registration/security/processing fee"
-- Lottery/ KBC/ prize: "You won, pay a fee to claim."
+State Instructions:
+- If "out-of-scope", set verdict to "green", scam_type to "Out of Scope".
+- If "clarify", set verdict to "yellow", provide ONE calm clarifying question in the "clarifying_question" field. If the user seems panicked (all-caps or distressed), prepend the question with a calming statement (e.g., "Take a deep breath, you did the right thing by checking. Did you already send money or share an OTP?").
+- If "data-at-risk", set verdict to "red". "what_to_do" MUST include: lock/monitor accounts, block the card, change passwords, and report. Do NOT tell them to call 1930 to freeze funds unless money was lost.
+- If "about-to-be", set verdict to "yellow" or "red".
+- If "mid-attack", set verdict to "red". Emphasize: "Hang up the call immediately. Real police never arrest over video calls."
+- If "already-scammed", set verdict to "red". "what_to_do" MUST include: Call 1930 immediately, freeze bank account.
 
-Rules:
-- If there are genuinely no red flags, return verdict "green" and state "about-to-be".
-- "what_to_do" for any scam MUST include: do not pay, do not click, block the sender, and report at cybercrime.gov.in or call 1930.
-- For "mid-attack", emphasize: "Hang up the call immediately. Real police never arrest over video calls."
-- "how_it_works" = one plain-language sentence explaining the trick so the user spots it next time.
+General Rules:
+- "how_it_works" = one plain-language sentence explaining the trick so the user spots it next time (leave empty for out-of-scope/clarify).
 - Reply in the SAME language as the user's input.
 - NEVER ask the user for personal or financial details.
 - Return ONLY the JSON object, no extra text.`;
 
+type AnalysisState = "about-to-be" | "mid-attack" | "already-scammed" | "data-at-risk" | "clarify" | "out-of-scope";
+
 type Analysis = {
-  state: "about-to-be" | "mid-attack" | "already-scammed";
+  state: AnalysisState;
   verdict: "green" | "yellow" | "red";
   scam_type: string;
   red_flags: string[];
   what_to_do: string[];
   how_it_works: string;
+  clarifying_question: string;
 };
 
 const analysisSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"],
+  required: ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works", "clarifying_question"],
   properties: {
-    state: { type: "string", enum: ["about-to-be", "mid-attack", "already-scammed"] },
+    state: { type: "string", enum: ["about-to-be", "mid-attack", "already-scammed", "data-at-risk", "clarify", "out-of-scope"] },
     verdict: { type: "string", enum: ["green", "yellow", "red"] },
     scam_type: { type: "string" },
     red_flags: { type: "array", items: { type: "string" } },
     what_to_do: { type: "array", items: { type: "string" } },
     how_it_works: { type: "string" },
+    clarifying_question: { type: "string" },
   },
 };
 
 const safeDefault: Analysis = {
-  state: "about-to-be",
+  state: "clarify",
   verdict: "yellow",
-  scam_type: "Treat this as suspicious",
-  red_flags: ["We couldn't analyse that completely — treat it as suspicious and avoid sharing details."],
-  what_to_do: [
-    "Do not pay or share personal or financial details.",
-    "Do not click links or approve payment requests.",
-    "Block the sender if they pressure you.",
-    "Report suspected fraud at cybercrime.gov.in or call 1930.",
-  ],
-  how_it_works: "When a message cannot be checked, pausing and verifying independently is the safest next step.",
+  scam_type: "Need more information",
+  red_flags: [],
+  what_to_do: [],
+  how_it_works: "",
+  clarifying_question: "We couldn't completely analyze that. Could you describe exactly what happened or paste the message?",
 };
 
-function getDeterministicFallback(text: string): Analysis {
+function getDeterministicFallback(text: string): Analysis | null {
   const lower = text.toLowerCase();
   
-  // Already scammed heuristic
+  // Guard 2 & 6: Pre-Triage Rules Engine (Injection Proof)
+  // If we detect strong money-loss signals, override any LLM instruction
   if (lower.includes("paid") || lower.includes("lost") || lower.includes("transferred") || lower.includes("deducted") || lower.includes("already sent")) {
     return {
       state: "already-scammed",
@@ -76,11 +77,12 @@ function getDeterministicFallback(text: string): Analysis {
       red_flags: ["Money has already been transferred or deducted."],
       what_to_do: ["Call 1930 immediately.", "Contact your bank to freeze the transaction.", "Save all chats and transaction IDs."],
       how_it_works: "Scammers create false urgency or promises to trick victims into sending money.",
+      clarifying_question: ""
     };
   }
 
-  // Mid-attack heuristic
-  if (lower.includes("on call") || lower.includes("on the phone") || lower.includes("video call") || lower.includes("threatening") || lower.includes("arrest") || lower.includes("cbi") || lower.includes("police")) {
+  // If we detect active threat signals
+  if ((lower.includes("on call") || lower.includes("on the phone") || lower.includes("video call")) && (lower.includes("threatening") || lower.includes("arrest") || lower.includes("cbi") || lower.includes("police") || lower.includes("customs"))) {
     return {
       state: "mid-attack",
       verdict: "red",
@@ -88,18 +90,12 @@ function getDeterministicFallback(text: string): Analysis {
       red_flags: ["Caller is threatening arrest or demanding immediate payment.", "Claiming to be law enforcement over a phone/video call."],
       what_to_do: ["Hang up the call immediately.", "Real police NEVER arrest over video calls or ask for money.", "Do not transfer any funds.", "Block the number."],
       how_it_works: "Scammers impersonate authorities to induce panic and force you to pay 'fines' or 'security deposits'.",
+      clarifying_question: ""
     };
   }
 
-  // About to be scammed heuristic (Default)
-  return {
-    state: "about-to-be",
-    verdict: "yellow",
-    scam_type: "Suspicious Contact",
-    red_flags: ["Unsolicited contact asking for information, clicks, or money."],
-    what_to_do: ["Do not click any links.", "Do not share OTPs, PINs, or personal details.", "Block the sender."],
-    how_it_works: "Scammers send mass messages with phishing links or fake offers to steal credentials.",
-  };
+  // Otherwise, let the LLM handle scope, data-at-risk, panic, etc.
+  return null;
 }
 
 function isAnalysis(value: unknown): value is Analysis {
@@ -107,19 +103,20 @@ function isAnalysis(value: unknown): value is Analysis {
 
   const candidate = value as Record<string, unknown>;
   const keys = Object.keys(candidate);
-  const expectedKeys = ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works"];
+  const expectedKeys = ["state", "verdict", "scam_type", "red_flags", "what_to_do", "how_it_works", "clarifying_question"];
 
   return (
     keys.length === expectedKeys.length &&
     expectedKeys.every((key) => keys.includes(key)) &&
-    (candidate.state === "about-to-be" || candidate.state === "mid-attack" || candidate.state === "already-scammed") &&
+    ["about-to-be", "mid-attack", "already-scammed", "data-at-risk", "clarify", "out-of-scope"].includes(candidate.state as string) &&
     (candidate.verdict === "green" || candidate.verdict === "yellow" || candidate.verdict === "red") &&
     typeof candidate.scam_type === "string" &&
     Array.isArray(candidate.red_flags) &&
     candidate.red_flags.every((flag) => typeof flag === "string") &&
     Array.isArray(candidate.what_to_do) &&
     candidate.what_to_do.every((step) => typeof step === "string") &&
-    typeof candidate.how_it_works === "string"
+    typeof candidate.how_it_works === "string" &&
+    typeof candidate.clarifying_question === "string"
   );
 }
 
@@ -190,25 +187,48 @@ export async function POST(request: Request) {
   }
 
   const text = body && typeof body === "object" ? (body as { text?: unknown }).text : undefined;
-  if (typeof text !== "string" || text.trim().length === 0) {
+  if (typeof text !== "string") {
     return NextResponse.json({ error: "Expected a non-empty text string." }, { status: 400 });
   }
+  
+  const trimmedText = text.trim();
+  
+  // Guard 1: Length / Meaningful words check
+  // If blank or under 3 meaningful words, do NOT classify.
+  const words = trimmedText.split(/\s+/).filter(w => w.length > 0);
+  if (words.length < 3) {
+    return NextResponse.json({
+      state: "clarify",
+      verdict: "yellow",
+      scam_type: "Need more information",
+      red_flags: [],
+      what_to_do: [],
+      how_it_works: "",
+      clarifying_question: "Tell me what happened — paste the complete message, or describe the call in a bit more detail.",
+    });
+  }
 
-  if (text.length > 5_000) {
+  if (trimmedText.length > 5_000) {
     return NextResponse.json({ error: "Text must be 5,000 characters or fewer." }, { status: 400 });
   }
 
+  // Guard 2 & 6: Pre-triage rules engine takes precedence if confident
+  const deterministicResult = getDeterministicFallback(trimmedText);
+  if (deterministicResult) {
+    return NextResponse.json(deterministicResult);
+  }
+
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return NextResponse.json(getDeterministicFallback(text));
+  if (!apiKey) return NextResponse.json(safeDefault);
 
   try {
-    // A strict JSON schema makes malformed output unlikely; retry once if it still occurs.
+    // LLM handles scope, data-at-risk, panic, and normal triage
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const modelOutput = await getModelOutput(text, apiKey);
+      const modelOutput = await getModelOutput(trimmedText, apiKey);
       const analysis = modelOutput ? parseAnalysis(modelOutput) : null;
       if (analysis) return NextResponse.json(analysis);
     }
 
-    return NextResponse.json(getDeterministicFallback(text));
-  } catch { return NextResponse.json(getDeterministicFallback(text)); }
+    return NextResponse.json(safeDefault);
+  } catch { return NextResponse.json(safeDefault); }
 }

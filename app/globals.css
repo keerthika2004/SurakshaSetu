@@ -213,3 +213,6 @@ textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23, 10
   .example-chip { width: 100%; text-align: center; }
   .reference-card strong { font-size: 0.94rem; overflow-wrap: anywhere; }
 }
+
+.clarification-banner { margin: 0 0 20px; padding: 14px 18px; border-left: 4px solid var(--primary); border-radius: 8px; background: #e8f4f6; color: var(--ink); text-align: left; font-size: 0.95rem; }
+.clarification-banner strong { color: var(--primary); }

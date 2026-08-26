@@ -2,7 +2,7 @@
 
 import { FormEvent, useState, useEffect } from "react";
 
-type AnalysisState = "about-to-be" | "mid-attack" | "already-scammed";
+type AnalysisState = "about-to-be" | "mid-attack" | "already-scammed" | "data-at-risk" | "clarify" | "out-of-scope";
 
 type Analysis = {
   state: AnalysisState;
@@ -11,17 +11,19 @@ type Analysis = {
   red_flags: string[];
   what_to_do: string[];
   how_it_works: string;
+  clarifying_question: string;
 };
 
 const verdictCopy = { green: "Looks safe", yellow: "Be careful", red: "This is almost certainly a scam" } as const;
 const MAX_MESSAGE_LENGTH = 5_000;
 const clientFallback: Analysis = { 
-  state: "about-to-be", 
+  state: "clarify", 
   verdict: "yellow", 
-  scam_type: "Treat this as suspicious", 
-  red_flags: ["We couldn't analyse that — treat it as suspicious and avoid sharing details."], 
-  what_to_do: ["Do not pay or share personal or financial details.", "Do not click links or approve payment requests.", "Block the sender if they pressure you.", "Report suspected fraud at cybercrime.gov.in or call 1930."], 
-  how_it_works: "When a message cannot be checked, pausing and verifying independently is the safest next step." 
+  scam_type: "Need more information", 
+  red_flags: [], 
+  what_to_do: [], 
+  how_it_works: "",
+  clarifying_question: "We couldn't completely analyze that. Could you describe exactly what happened or paste the message?",
 };
 
 const examples = [
@@ -33,7 +35,7 @@ const examples = [
 function isAnalysis(value: unknown): value is Analysis {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return (item.state === "about-to-be" || item.state === "mid-attack" || item.state === "already-scammed") && (item.verdict === "green" || item.verdict === "yellow" || item.verdict === "red") && typeof item.scam_type === "string" && Array.isArray(item.red_flags) && item.red_flags.every((flag) => typeof flag === "string") && Array.isArray(item.what_to_do) && item.what_to_do.every((step) => typeof step === "string") && typeof item.how_it_works === "string";
+  return ["about-to-be", "mid-attack", "already-scammed", "data-at-risk", "clarify", "out-of-scope"].includes(item.state as string) && (item.verdict === "green" || item.verdict === "yellow" || item.verdict === "red") && typeof item.scam_type === "string" && Array.isArray(item.red_flags) && item.red_flags.every((flag) => typeof flag === "string") && Array.isArray(item.what_to_do) && item.what_to_do.every((step) => typeof step === "string") && typeof item.how_it_works === "string" && typeof item.clarifying_question === "string";
 }
 
 export default function Home() {
@@ -44,6 +46,7 @@ export default function Home() {
   const [text, setText] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [error, setError] = useState("");
+  const [clarification, setClarification] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
   // Recovery State
@@ -78,9 +81,20 @@ export default function Home() {
 
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!text.trim()) { setError("Paste the message, call details, or describe the situation first."); return; }
     if (text.length > MAX_MESSAGE_LENGTH) { setError("Please keep the message to 5,000 characters or fewer."); return; }
-    setError(""); setAnalysis(null); setIsLoading(true);
+    
+    // We do NOT block on empty text here anymore. We let the API's Guard 1 handle it.
+    // However, if the user hits submit on a perfectly empty box, we can just show the clarification immediately to save a network request.
+    if (!text.trim()) {
+      setClarification("Tell me what happened — paste the message, or describe the call.");
+      setError("");
+      return;
+    }
+
+    setError(""); 
+    setClarification("");
+    setAnalysis(null); 
+    setIsLoading(true);
     
     let currentAnalysis = clientFallback;
     try {
@@ -95,11 +109,18 @@ export default function Home() {
       setIsLoading(false); 
       setAnalysis(currentAnalysis);
       
-      if (currentAnalysis.state === "already-scammed") {
+      if (currentAnalysis.state === "out-of-scope") {
+        setError("I can only help with suspected cyber fraud. Describe the message or call you're worried about.");
+        setView("triage-form");
+      } else if (currentAnalysis.state === "clarify") {
+        setClarification(currentAnalysis.clarifying_question);
+        setView("triage-form");
+      } else if (currentAnalysis.state === "already-scammed") {
         setDescription(text); // Pre-fill description
         setRecoveryStep(1);
         setView("recovery");
       } else {
+        // data-at-risk, mid-attack, about-to-be
         setView("verdict");
       }
     }
@@ -110,6 +131,7 @@ export default function Home() {
     setAnalysis(null);
     setText("");
     setError("");
+    setClarification("");
   }
 
   function getTriageVerdict() {
@@ -188,10 +210,17 @@ export default function Home() {
               <h2>Tell us what's happening</h2>
               <p>We'll figure out if it's a scam and guide you on exactly what to do next.</p>
             </div>
+            
+            {clarification && (
+              <div className="clarification-banner" role="status" aria-live="polite">
+                <p><strong>Wait:</strong> {clarification}</p>
+              </div>
+            )}
+
             <form className="triage-form" onSubmit={handleAnalyze}>
               <div className="example-chips" aria-label="Try an example">
                 {examples.map((example) => (
-                  <button key={example.label} type="button" className="example-chip" disabled={isLoading} onClick={() => { setText(example.text); setError(""); }}>
+                  <button key={example.label} type="button" className="example-chip" disabled={isLoading} onClick={() => { setText(example.text); setError(""); setClarification(""); }}>
                     {example.label}
                   </button>
                 ))}
@@ -223,22 +252,36 @@ export default function Home() {
         {view === "verdict" && analysis && (
           <section className="analysis-result slide-in" aria-live="polite" aria-label="Scam analysis result">
             <div className={`verdict-banner verdict-${analysis.verdict}`}>
-              <p>{analysis.state === 'mid-attack' ? 'LIVE COACHING' : 'OUR ASSESSMENT'}</p>
-              <h2>{analysis.state === 'mid-attack' ? 'This is a scam. Hang up.' : verdictCopy[analysis.verdict]}</h2>
+              <p>
+                {analysis.state === 'mid-attack' ? 'LIVE COACHING' : 
+                 analysis.state === 'data-at-risk' ? 'DATA AT RISK' : 'OUR ASSESSMENT'}
+              </p>
+              <h2>
+                {analysis.state === 'mid-attack' ? 'This is a scam. Hang up.' : verdictCopy[analysis.verdict]}
+              </h2>
               <span>{analysis.scam_type}</span>
             </div>
             <section className="result-section action-section">
-              <h3>{analysis.state === 'mid-attack' ? 'Do this RIGHT NOW' : 'Precautions to take'}</h3>
+              <h3>
+                {analysis.state === 'mid-attack' ? 'Do this RIGHT NOW' : 
+                 analysis.state === 'data-at-risk' ? 'Protect yourself now' : 'Precautions to take'}
+              </h3>
               <ul className="checklist">{analysis.what_to_do.map((step, index) => <li key={`${step}-${index}`}>{step}</li>)}</ul>
             </section>
-            <section className="result-section">
-              <h3>Red Flags</h3>
-              <ul className="flag-list">{analysis.red_flags.map((flag, index) => <li key={`${flag}-${index}`}>{flag}</li>)}</ul>
-            </section>
-            <aside className="how-it-works">
-              <h3>How it works</h3>
-              <p>{analysis.how_it_works}</p>
-            </aside>
+            
+            {analysis.red_flags.length > 0 && (
+              <section className="result-section">
+                <h3>Red Flags</h3>
+                <ul className="flag-list">{analysis.red_flags.map((flag, index) => <li key={`${flag}-${index}`}>{flag}</li>)}</ul>
+              </section>
+            )}
+
+            {analysis.how_it_works && (
+              <aside className="how-it-works">
+                <h3>How it works</h3>
+                <p>{analysis.how_it_works}</p>
+              </aside>
+            )}
             <button type="button" className="button button-secondary" onClick={resetToHome}>Check another message</button>
           </section>
         )}
